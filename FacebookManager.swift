@@ -1,23 +1,24 @@
 //
-//  FacebookManager.swift
-//  FacebookExample
+//  APFacebookManager.swift
+//  OnDemandApp
 //
-//  Created by Shwetabh Singh on 27/06/16.
-//  Copyright © 2016. All rights reserved.
+//  Created by Shwetabh Singh on 01/07/16.
+//  Copyright © 2016 Appster. All rights reserved.
 //
 
 import Foundation
 import FBSDKCoreKit
-import FBSDKShareKit
+//import FBSDKShareKit
 import FBSDKLoginKit
 import Social
 
 // Completion Handler returns user or error
 typealias FBCompletionHandler = (userDict: [String : String]?, error: NSError?) -> Void
 
-class FacebookManager {
+class APFacebookManager {
     
-    private static var manager = FacebookManager()
+    private static var manager = APFacebookManager()
+    //var facebookAppID: String?
     var configuration : FacebookConfiguration = FacebookConfiguration.defaultConfiguration()
     var fbCompletionHandler: FBCompletionHandler?
     
@@ -32,7 +33,7 @@ class FacebookManager {
      
      - returns: an instance of FacebookManager which can be accessed via sharedManager()
      */
-    class func managerWithConfiguration(config: FacebookConfiguration!) -> FacebookManager {
+    class func managerWithConfiguration(config: FacebookConfiguration!) -> APFacebookManager {
         
         if config != nil {
             manager.configuration = config!
@@ -41,7 +42,7 @@ class FacebookManager {
         return manager
     }
     
-    class func sharedManager() -> FacebookManager {
+    class func sharedManager() -> APFacebookManager {
         if isManagerConfigured() == false {
             managerWithConfiguration(FacebookConfiguration.defaultConfiguration())
         }
@@ -83,9 +84,8 @@ class FacebookManager {
     }
     
     func logout() {
-        FBSDKLoginManager().logOut()
         
-        self.user = nil
+        FBSDKLoginManager().logOut()
         
         // flush permissions
         configuration.permissions = []
@@ -95,12 +95,16 @@ class FacebookManager {
         let accountStore = ACAccountStore()
         let accountType = accountStore.accountTypeWithAccountTypeIdentifier(ACAccountTypeIdentifierFacebook)
         
-        let options: [String: AnyObject] = [ACFacebookAppIdKey: "164422667306002",
-                                            ACFacebookPermissionsKey: [FacebookConfiguration.Permissions.PublicProfile, FacebookConfiguration.Permissions.Email],
-                                            ACFacebookAudienceKey: ACFacebookAudienceFriends]
-        
+
+        var options = [String: AnyObject]()
+        options = [ACFacebookAppIdKey: FacebookConfiguration.fbAppId(),
+                       ACFacebookPermissionsKey: [FacebookConfiguration.Permissions.PublicProfile, FacebookConfiguration.Permissions.Email],
+                       ACFacebookAudienceKey: ACFacebookAudienceFriends]
+        }
         accountStore.requestAccessToAccountsWithType(accountType, options: options) { (success, error) -> Void in
             
+            dispatch_async(dispatch_get_main_queue(), { () -> Void in
+                
                 if !success {
                     self.fbCompletionHandler!(userDict : nil, error: NSError(domain: "Error", code: 201, userInfo: ["info" : error.localizedDescription]))
                     return
@@ -113,12 +117,22 @@ class FacebookManager {
                     self.fbCompletionHandler!(userDict : nil, error: NSError(domain: "Error", code: 201, userInfo: ["info":"There is no Facebook account configured. You can add or create a Facebook account in Settings."]))
                     return
                 }
-            
-            var dict:NSDictionary = NSDictionary()
-            dict=fbAccount.dictionaryWithValuesForKeys(["properties"])
-            let properties:NSDictionary=dict["properties"] as! NSDictionary
-            print("facebook Response is-->:%@",properties)
-            self.fetchProfileInfoAccountsFramework(properties)
+                
+                var dict:NSDictionary = NSDictionary()
+                dict=fbAccount.dictionaryWithValuesForKeys(["properties"])
+                let properties:NSDictionary=dict["properties"] as! NSDictionary
+                
+                self.fetchProfileInfoAccountsFramework(fbAccount, completion: { (success, id) in
+                    if success
+                    {
+                        properties.setValue(fbAccount.credential.oauthToken, forKey: "fb_accessToken")
+                        properties.setValue(id, forKey: "id")
+                        dispatch_async(dispatch_get_main_queue(), {
+                            self.userParserForAccountsFramework(properties)
+                        })
+                    }
+                })
+            })
         }
     }
     
@@ -126,11 +140,11 @@ class FacebookManager {
         if self.isTokenValid() {
             self.fetchProfileInfo(nil)
         } else {
-            print(configuration.permissions!)
+            LogManager.logDebug("\(configuration.permissions!)")
             
-            FBSDKLoginManager().loginBehavior = .SystemAccount
+            FBSDKLoginManager().loginBehavior = .Native
             
-            FBSDKLoginManager().logInWithReadPermissions(configuration.permissions, fromViewController: nil) { (result:FBSDKLoginManagerLoginResult!, error:NSError!) -> Void in
+            FBSDKLoginManager().logInWithReadPermissions(["public_profile" , "email"], fromViewController: nil) { (result:FBSDKLoginManagerLoginResult!, error:NSError!) -> Void in
                 if error != nil {
                     // According to Facebook:
                     // Errors will rarely occur in the typical login flow because the login dialog
@@ -139,12 +153,12 @@ class FacebookManager {
                     // Process error
                     FBSDKLoginManager().logOut()
                     self.fbCompletionHandler!(userDict: nil, error: error)
-
+                    
                 } else if result.isCancelled {
                     // Handle cancellations
                     FBSDKLoginManager().logOut()
                     self.fbCompletionHandler!(userDict: nil, error: error)
-
+                    
                 } else {
                     // If you ask for multiple permissions at once, you
                     // should check if specific permissions missing
@@ -178,7 +192,7 @@ class FacebookManager {
     //
     
     /**
-     Login with facebook which returns dictionary with format {"email" : "" , "accountID" : "" , "name" : "" , "profilePicture" : ""}
+     Login with facebook which returns dictionary with format {"email" : "" , "accountID" : "" , "name" : "" , "profilePicture" : "" , "fb_accessToken" : ""}
      
      - parameter handler: return with SocialCompletionHandler, either valid social user or with error information
      */
@@ -223,10 +237,8 @@ class FacebookManager {
             } else {
                 //LogManager.logDebug("success get profile info: = \(result!)")
                 
-                print(result)
-                
                 if let userInfo:NSDictionary = result as? NSDictionary {
-                    //print(userInfo)
+                    
                     self.userParser(userInfo)
                     
                 } else {
@@ -236,31 +248,43 @@ class FacebookManager {
         }
     }
     
+    func fetchProfileInfoAccountsFramework(fbAccount : ACAccount , completion : (success:Bool , id : String) -> Void) {
+        let url = NSURL.init(string: "https://graph.facebook.com/me")
+        let request = SLRequest.init(forServiceType: SLServiceTypeFacebook, requestMethod: SLRequestMethod.GET, URL: url, parameters: nil)
+        request.account = fbAccount
+        request.performRequestWithHandler { (data:NSData!, respomse:NSHTTPURLResponse!, error:NSError!) in
+            do {
+                let responseDict = try NSJSONSerialization.JSONObjectWithData(data, options: []) as! NSDictionary
+                completion(success: true, id: responseDict.valueForKey("id") as! String)
+                
+            }catch  {
+                
+                completion(success: false, id: "")
+                return
+            }
+        }
+    }
+    
     func userParser(userDict : NSDictionary) {
         
-        print(userDict)
-        
         self.user?["email"] = userDict["email"] as? String
-        print(self.user?["email"])
         self.user?["accountID"] = userDict["id"] as? String
-        self.user?["name"] = userDict["first_name"] as? String
-        self.user?["profilePicture"] = userDict["picture"]!["data"]!["url"] as? String
-        
-        print(self.user)
-        
+        self.user?["name"] = (userDict["first_name"] as? String)! + " " + (userDict["last_name"] as? String)!
+        self.user?["profilePicture"] = userDict["picture"]!["data"]!!["url"] as? String
+        self.user?["fb_accessToken"] = (APFacebookManager.token()?.tokenString)!
         self.fbCompletionHandler!(userDict:self.user , error : nil)
     }
     
-    func fetchProfileInfoAccountsFramework(userDict : NSDictionary) {
+    func userParserForAccountsFramework(userDict : NSDictionary) {
         
         self.user?["email"] = userDict["ACUIDisplayUsername"] as? String
-        print(self.user?["email"])
-        self.user?["accountID"] = String(userDict["uid"] as! Int)
+        self.user?["accountID"] = userDict["id"] as? String//String(userDict["uid"] as! Int)
         self.user?["name"] = userDict["ACPropertyFullName"] as? String
         self.user?["profilePicture"] = "http://graph.facebook.com/\(String(userDict["uid"] as! Int))/picture?type=large"
-        
+        self.user?["fb_accessToken"] = userDict["fb_accessToken"] as? String
         self.fbCompletionHandler!(userDict:self.user , error : nil)
     }
+    
     
     //
     // MARK: - Friends
@@ -278,8 +302,10 @@ class FacebookManager {
             
             if let error = error { // handle error
                 self.logout()
+                //LogManager.logError("error in getting friends = \(error.localizedDescription)")
                 completion(result: nil, error: NSError(domain: "Error", code: 201, userInfo: ["info" : error.localizedDescription]))
             } else {
+                //LogManager.logDebug("success get friends: = \(result!)")
                 if let friends:NSDictionary = result as? NSDictionary {
                     completion(result: friends, error: nil)
                 } else {
@@ -332,16 +358,15 @@ class FacebookManager {
 }
 
 
-
 // MARK: - Facebook Configutaion Class
 
 class FacebookConfiguration {
     
-    private static var fbConfiguration: FacebookConfiguration?
+    static var fbConfiguration: FacebookConfiguration?
     
     var isConfigured: Bool! = false
     var permissions: [String]!
-    var facebookAppID : String! = "164422667306002"
+    var facebookAppID : String! = ConfigurationManager.sharedManager().facebookAppId()
     
     // MARK: - Permissions
     struct Permissions {
@@ -381,6 +406,7 @@ class FacebookConfiguration {
         // Optionally add to ensure your credentials are valid:
         FBSDKLoginManager.renewSystemCredentials { (result: ACAccountCredentialRenewResult, error: NSError!) -> Void in
             if let _ = error {
+                //LogManager.logError(error.localizedDescription)
             }
         }
         
@@ -392,11 +418,7 @@ class FacebookConfiguration {
         return FacebookConfiguration.fbConfiguration?.facebookAppID
     }
     
-    private class func defaultPermissions() -> [String] {
+    class func defaultPermissions() -> [String] {
         return [Permissions.PublicProfile, Permissions.Email]
-    }
-
-    
+    }   
 }
-
-
