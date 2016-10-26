@@ -366,7 +366,7 @@ class FacebookConfiguration {
     
     var isConfigured: Bool! = false
     var permissions: [String]!
-    var facebookAppID : String! = ConfigurationManager.sharedManager().facebookAppId()
+    var facebookAppID : String! = "Your_FB_APPID"
     
     // MARK: - Permissions
     struct Permissions {
